@@ -1,0 +1,434 @@
+import discord
+from discord.ext import commands
+from discord import app_commands
+import json
+import os
+from datetime import datetime
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+STATE_FILE = "difficulty_state.json"
+
+SWITCHES = [
+    "Normal",
+    "Hard",
+    "Treacherous",
+    "Kingslayer"
+]
+
+# ============================================
+# LOAD / SAVE STATE
+# ============================================
+
+
+def default_state():
+    return {
+        "switches": {
+            name: {
+                "locked": False,
+                "user_id": None,
+                "username": None
+            }
+            for name in SWITCHES
+        },
+        "log": [],
+        "panel_message_id": None,
+        "panel_channel_id": None
+    }
+
+
+def load_state():
+
+    if not os.path.exists(STATE_FILE):
+        return default_state()
+
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+
+    except:
+        return default_state()
+
+
+state = load_state()
+
+
+def save_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=4)
+
+# ============================================
+# TIME FORMAT
+# ============================================
+
+
+def timestamp():
+    return datetime.now().strftime("%I:%M %p").lstrip("0")
+
+# ============================================
+# LOGGING
+# ============================================
+
+
+def add_log(entry):
+
+    state["log"].append(
+        f"[{timestamp()}] {entry}"
+    )
+
+    state["log"] = state["log"][-25:]
+
+    save_state()
+
+# ============================================
+# EMBED
+# ============================================
+
+
+def build_embed():
+
+    embed = discord.Embed(
+        title="⚔️ Difficulty Locks",
+        description=(
+            "🟢 = Unlocked\n"
+            "🔴 = Locked\n\n"
+            "Click the circles below to lock/unlock."
+        ),
+        color=discord.Color.dark_gold()
+    )
+
+    for name in SWITCHES:
+
+        info = state["switches"][name]
+
+        if info["locked"]:
+            value = f"🔴 Locked by **{info['username']}**"
+        else:
+            value = "🟢 Unlocked"
+
+        embed.add_field(
+            name=name,
+            value=value,
+            inline=False
+        )
+
+    log_text = "\n".join(state["log"][-10:])
+
+    if not log_text:
+        log_text = "No actions recorded yet."
+
+    embed.add_field(
+        name="📜 Activity Log",
+        value=log_text,
+        inline=False
+    )
+
+    return embed
+
+# ============================================
+# UPDATE PANEL
+# ============================================
+
+
+async def refresh_panel():
+
+    if not state["panel_message_id"]:
+        return
+
+    try:
+
+        channel = bot.get_channel(state["panel_channel_id"])
+
+        if not channel:
+            return
+
+        message = await channel.fetch_message(state["panel_message_id"])
+
+        await message.edit(
+            embed=build_embed(),
+            view=DifficultyView()
+        )
+
+    except Exception as e:
+        print("Refresh panel error:", e)
+
+# ============================================
+# FORCE UNLOCK SELECT
+# ============================================
+
+
+class ForceUnlockSelect(discord.ui.Select):
+
+    def __init__(self):
+
+        options = [
+            discord.SelectOption(label=name)
+            for name in SWITCHES
+        ]
+
+        super().__init__(
+            placeholder="Select switch to force unlock",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+
+        switch_name = self.values[0]
+
+        info = state["switches"][switch_name]
+
+        if not info["locked"]:
+
+            await interaction.response.defer()
+            return
+
+        previous_user = info["username"]
+
+        info["locked"] = False
+        info["user_id"] = None
+        info["username"] = None
+
+        add_log(
+            f"{interaction.user.display_name} force unlocked {switch_name} (previously locked by {previous_user})"
+        )
+
+        await refresh_panel()
+
+        await interaction.response.defer()
+
+# ============================================
+# FORCE UNLOCK VIEW
+# ============================================
+
+
+class ForceUnlockView(discord.ui.View):
+
+    def __init__(self):
+        super().__init__(timeout=60)
+        self.add_item(ForceUnlockSelect())
+
+# ============================================
+# MAIN BUTTON VIEW
+# ============================================
+
+
+class DifficultyView(discord.ui.View):
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def handle_toggle(self, interaction, switch_name):
+
+        info = state["switches"][switch_name]
+
+        user_id = interaction.user.id
+        username = interaction.user.display_name
+
+        # LOCK
+        if not info["locked"]:
+
+            info["locked"] = True
+            info["user_id"] = user_id
+            info["username"] = username
+
+            add_log(f"{username} locked {switch_name}")
+
+            save_state()
+
+            await refresh_panel()
+
+            await interaction.response.defer()
+
+            return
+
+        # UNLOCK OWN
+        if info["user_id"] == user_id:
+
+            info["locked"] = False
+            info["user_id"] = None
+            info["username"] = None
+
+            add_log(f"{username} unlocked {switch_name}")
+
+            save_state()
+
+            await refresh_panel()
+
+            await interaction.response.defer()
+
+            return
+
+        # DENY
+        add_log(
+            f"{username} attempted to unlock {switch_name} owned by {info['username']}"
+        )
+
+        await interaction.response.defer()
+
+    # ========================================
+    # LARGE CIRCLE BUTTONS
+    # ========================================
+
+    @discord.ui.button(
+        label="🟢 Normal",
+        style=discord.ButtonStyle.success,
+        custom_id="normal_button",
+        row=0
+    )
+    async def normal_button(self, interaction, button):
+
+        if state["switches"]["Normal"]["locked"]:
+            button.label = "🔴 Normal"
+            button.style = discord.ButtonStyle.danger
+        else:
+            button.label = "🟢 Normal"
+            button.style = discord.ButtonStyle.success
+
+        await self.handle_toggle(interaction, "Normal")
+
+    @discord.ui.button(
+        label="🟢 Hard",
+        style=discord.ButtonStyle.success,
+        custom_id="hard_button",
+        row=0
+    )
+    async def hard_button(self, interaction, button):
+
+        if state["switches"]["Hard"]["locked"]:
+            button.label = "🔴 Hard"
+            button.style = discord.ButtonStyle.danger
+        else:
+            button.label = "🟢 Hard"
+            button.style = discord.ButtonStyle.success
+
+        await self.handle_toggle(interaction, "Hard")
+
+    @discord.ui.button(
+        label="🟢 Treacherous",
+        style=discord.ButtonStyle.success,
+        custom_id="treacherous_button",
+        row=1
+    )
+    async def treacherous_button(self, interaction, button):
+
+        if state["switches"]["Treacherous"]["locked"]:
+            button.label = "🔴 Treacherous"
+            button.style = discord.ButtonStyle.danger
+        else:
+            button.label = "🟢 Treacherous"
+            button.style = discord.ButtonStyle.success
+
+        await self.handle_toggle(interaction, "Treacherous")
+
+    @discord.ui.button(
+        label="🟢 Kingslayer",
+        style=discord.ButtonStyle.success,
+        custom_id="kingslayer_button",
+        row=1
+    )
+    async def kingslayer_button(self, interaction, button):
+
+        if state["switches"]["Kingslayer"]["locked"]:
+            button.label = "🔴 Kingslayer"
+            button.style = discord.ButtonStyle.danger
+        else:
+            button.label = "🟢 Kingslayer"
+            button.style = discord.ButtonStyle.success
+
+        await self.handle_toggle(interaction, "Kingslayer")
+
+    # ========================================
+    # GREY BUTTONS
+    # ========================================
+
+    @discord.ui.button(
+        label="Force Unlock",
+        style=discord.ButtonStyle.secondary,
+        custom_id="force_unlock_button",
+        row=2
+    )
+    async def force_unlock_button(self, interaction, button):
+
+        await interaction.response.send_message(
+            "Choose a switch to force unlock:",
+            view=ForceUnlockView(),
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Clear Log",
+        style=discord.ButtonStyle.secondary,
+        custom_id="clear_log_button",
+        row=2
+    )
+    async def clear_log_button(self, interaction, button):
+
+        username = interaction.user.display_name
+
+        state["log"] = []
+
+        add_log(f"{username} cleared the log")
+
+        save_state()
+
+        await refresh_panel()
+
+        await interaction.response.defer()
+
+# ============================================
+# SLASH COMMAND
+# ============================================
+
+
+@bot.tree.command(
+    name="setup",
+    description="Create the difficulty lock panel"
+)
+async def setup(interaction: discord.Interaction):
+
+    embed = build_embed()
+
+    view = DifficultyView()
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=view
+    )
+
+    message = await interaction.original_response()
+
+    state["panel_message_id"] = message.id
+    state["panel_channel_id"] = interaction.channel.id
+
+    save_state()
+
+# ============================================
+# READY EVENT
+# ============================================
+
+
+@bot.event
+async def on_ready():
+
+    bot.add_view(DifficultyView())
+
+    await bot.tree.sync()
+
+    print("================================")
+    print(f"Logged in as {bot.user}")
+    print("Bot is online and ready.")
+    print("================================")
+
+# ============================================
+# RUN BOT
+# ============================================
+
+
+bot.run(BOT_TOKEN)
