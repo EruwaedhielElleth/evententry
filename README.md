@@ -1,2 +1,0 @@
-# evententry
-event entry bot 
