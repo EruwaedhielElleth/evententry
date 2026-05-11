@@ -249,7 +249,7 @@ async def on_ready():
         expiry_loop.start()
 
     await bot.tree.sync()
-    print(f"Logged in as {bot.user}")
+print("Slash commands synced")
 
 # ----------------------------
 # RUN
